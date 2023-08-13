@@ -12,6 +12,7 @@ TARGET_URL = 'https://www.webhook.site'
 NUMBERS_TASKS = 3
 DATABASE_NAME = 'postgres'
 TABLE_NAME = 'webhook'
+SQL_PATH = f"sql/webhook.sql"
 
 
 def get_data(url):
@@ -33,7 +34,43 @@ def write_json(data, num_file):
     data_json = json.dumps(data)
     with open(f'{TEMP_DIR_PATH}data_{num_file}.ndjson', 'a') as f:
         f.write(data_json + '\n')
-    # os.sync()
+
+
+def check_count_files(folder, count):
+    file_list = os.listdir(folder)
+    return len(file_list) == count
+
+
+def sql_query():
+    start_sql = f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                Webhook_id SERIAL PRIMARY KEY,
+                Cache_Control VARCHAR,
+                Content_Encoding VARCHAR,
+                Content_Type VARCHAR,
+                Date VARCHAR,
+                Server VARCHAR,
+                Set_Cookie VARCHAR,
+                Transfer_Encoding VARCHAR,
+                Vary VARCHAR
+                );
+              """
+    json_files = os.listdir(TEMP_DIR_PATH)
+    with open(f"dags/{SQL_PATH}", 'w') as sql_file:
+        for file in json_files:
+            with open(f"{TEMP_DIR_PATH}{file}", 'r') as f:
+                data = json.load(f)
+                keys = list(data.keys())
+                column = ", ".join(list(map(lambda x: x.replace('-', '_'), keys)))
+                values = ", ".join(list(map(lambda x: "E'" + x + "'", [data.get(key) for key in keys])))
+                start_sql = start_sql + f"""
+                       INSERT INTO {TABLE_NAME} ({column})
+                       VALUES ({values});
+                           """
+
+        sql_file.write(start_sql)
+    return start_sql
+
 
 @dag(
     dag_id='webhook_import_export',
@@ -43,46 +80,35 @@ def write_json(data, num_file):
     tags=["example"],
 )
 def webhook_import_export():
-    create_dir(TEMP_DIR_PATH)
-    for num_task in range(1, NUMBERS_TASKS + 1):
-        @task()
-        def extract(task_num):
-            response_data = get_data(TARGET_URL)
-            write_json(response_data, task_num)
-            response_data.clear()
+    @task()
+    def create_tmp_dir():
+        create_dir(TEMP_DIR_PATH)
 
-
-        extract(num_task)
+    @task()
+    def extract(task_num):
+        response_data = get_data(TARGET_URL)
+        write_json(response_data, task_num)
+        response_data.clear()
 
     @task()
     def check():
-        time.sleep(1)
-        file_list = os.listdir(TEMP_DIR_PATH)
-        json_files = file_list
-        if len(json_files) != NUMBERS_TASKS:
-            print('*' * 100)
-            print(len(json_files))
-            raise ValueError('Extract task filed')
+        if not check_count_files(TEMP_DIR_PATH, NUMBERS_TASKS):
+            raise ValueError('Extract tasks filed')
 
-    check()
+    @task
+    def query():
+        query = sql_query()
 
     create_pet_table = PostgresOperator(
         task_id="load",
         postgres_conn_id='postgres_default',
-        sql=f"""
-                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-                Webhook_id SERIAL PRIMARY KEY,
-                Cache_Control VARCHAR,
-                Content_Type VARCHAR,
-                Date VARCHAR,
-                Server VARCHAR,
-                Set_Cookie VARCHAR,
-                Transfer_Encoding VARCHAR,
-                Vary VARCHAR
-                );
-              """,
+        sql='sql/webhook.sql',
     )
 
+    extract_tasks = [extract(num_task) for num_task in range(1, NUMBERS_TASKS + 1)]
+    check_task = check()
+    create_tmp_dir = create_tmp_dir()
+    create_tmp_dir >> extract_tasks >> check_task >> query() >> create_pet_table
 
 
 webhook_import_export()

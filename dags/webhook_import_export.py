@@ -1,4 +1,4 @@
-import time
+from airflow.models import Variable
 from datetime import datetime
 from airflow.decorators import dag, task
 import json
@@ -9,10 +9,23 @@ from airflow.providers.postgres.operators.postgres import PostgresOperator
 
 TEMP_DIR_PATH = '/tmp/webhook/'
 TARGET_URL = 'https://www.webhook.site'
-NUMBERS_TASKS = 3
 DATABASE_NAME = 'postgres'
+NUMBERS_TASKS = int(Variable.get("WEBHOOK_NUMBERS_TASKS"))
 TABLE_NAME = 'webhook'
 SQL_PATH = f"sql/webhook.sql"
+START_SQL = f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                Webhook_id SERIAL PRIMARY KEY,
+                Cache_Control VARCHAR,
+                Content_Encoding VARCHAR,
+                Content_Type VARCHAR,
+                Date VARCHAR,
+                Server VARCHAR,
+                Set_Cookie VARCHAR,
+                Transfer_Encoding VARCHAR,
+                Vary VARCHAR
+                );
+              """
 
 
 def get_data(url):
@@ -41,35 +54,25 @@ def check_count_files(folder, count):
     return len(file_list) == count
 
 
-def sql_query():
-    start_sql = f"""
-                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-                Webhook_id SERIAL PRIMARY KEY,
-                Cache_Control VARCHAR,
-                Content_Encoding VARCHAR,
-                Content_Type VARCHAR,
-                Date VARCHAR,
-                Server VARCHAR,
-                Set_Cookie VARCHAR,
-                Transfer_Encoding VARCHAR,
-                Vary VARCHAR
-                );
-              """
-    json_files = os.listdir(TEMP_DIR_PATH)
+def write_sql(text):
     with open(f"dags/{SQL_PATH}", 'w') as sql_file:
-        for file in json_files:
-            with open(f"{TEMP_DIR_PATH}{file}", 'r') as f:
-                data = json.load(f)
-                keys = list(data.keys())
-                column = ", ".join(list(map(lambda x: x.replace('-', '_'), keys)))
-                values = ", ".join(list(map(lambda x: "E'" + x + "'", [data.get(key) for key in keys])))
-                start_sql = start_sql + f"""
-                       INSERT INTO {TABLE_NAME} ({column})
-                       VALUES ({values});
-                           """
+        sql_file.write(text)
 
-        sql_file.write(start_sql)
-    return start_sql
+
+def create_sql_query():
+    query = START_SQL
+    json_files = os.listdir(TEMP_DIR_PATH)
+    for file in json_files:
+        with open(f"{TEMP_DIR_PATH}{file}", 'r') as f:
+            data = json.load(f)
+            keys = list(data.keys())
+            column = ", ".join(list(map(lambda x: x.replace('-', '_'), keys)))
+            values = ", ".join(list(map(lambda x: "E'" + x + "'", [data.get(key) for key in keys])))
+            query = query + f"""
+                    INSERT INTO {TABLE_NAME} ({column})
+                    VALUES ({values});
+                           """
+    write_sql(query)
 
 
 @dag(
@@ -77,7 +80,7 @@ def sql_query():
     schedule=None,
     start_date=datetime(2023, 8, 10),
     catchup=False,
-    tags=["example"],
+    tags=["webhook"],
 )
 def webhook_import_export():
     @task()
@@ -96,19 +99,17 @@ def webhook_import_export():
             raise ValueError('Extract tasks filed')
 
     @task
-    def query():
-        query = sql_query()
+    def create_query():
+        create_sql_query()
 
-    create_pet_table = PostgresOperator(
+    load_data = PostgresOperator(
         task_id="load",
         postgres_conn_id='postgres_default',
         sql='sql/webhook.sql',
     )
 
     extract_tasks = [extract(num_task) for num_task in range(1, NUMBERS_TASKS + 1)]
-    check_task = check()
-    create_tmp_dir = create_tmp_dir()
-    create_tmp_dir >> extract_tasks >> check_task >> query() >> create_pet_table
+    create_tmp_dir() >> extract_tasks >> check() >> load_data
 
 
 webhook_import_export()

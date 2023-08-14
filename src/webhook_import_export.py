@@ -109,7 +109,7 @@ def webhook_import_export():
     )
 
     extract_tasks = [extract(num_task) for num_task in range(1, NUMBERS_TASKS + 1)]
-    create_tmp_dir() >> extract_tasks >> check() >> load_data
+    create_tmp_dir() >> extract_tasks >> check() >> create_query() >> load_data
 
 
 webhook_import_export()
